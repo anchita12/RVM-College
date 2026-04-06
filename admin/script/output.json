@@ -1,0 +1,42 @@
+{
+    "exam_student_paper_info": {
+        "sno": "1532",
+        "exam_student_info_sno": "259",
+        "add_subject_papers_sno": "20",
+        "student_paper_mapping_sno": "780",
+        "credit": null,
+        "status": "0",
+        "teacher_internal": null,
+        "verifier_external": null,
+        "mid_sem_marks_obt": "",
+        "marks_obt": "0",
+        "created_by": "1",
+        "creation_time": "2026-03-03 23:14:27",
+        "edited_by": null,
+        "edition_time": null,
+        "pre_marks": null,
+        "admin_remark": null,
+        "is_absent": "0",
+        "is_mid_sem_absent": "0",
+        "practical_marks_obt": "0",
+        "is_practical_absent": "0"
+    },
+    "add_subject_papers": {
+        "sno": "20",
+        "class_id": "15",
+        "subject_id": "6",
+        "paper_code": "A130705P",
+        "paper_title": "PRACTICAL",
+        "theory_practical": "Practical",
+        "academic_credit": "",
+        "class_type": "PG",
+        "paper_type": "practical",
+        "max_marks": "25",
+        "mid_sem_max_marks": "0",
+        "is_locked": "",
+        "has_theory": "0",
+        "has_internal": "1",
+        "has_practical": "1",
+        "practical_max_marks": "75"
+    }
+}

@@ -1,0 +1,455 @@
+body {
+    background-color: #f5f7fb;
+}
+
+
+.institute-header {
+    background: #fff;
+    border-bottom: 3px solid #1e3a8a;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    position: relative;
+    overflow: hidden;
+}
+
+
+
+.institute-header::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image: repeating-linear-gradient(45deg,
+            transparent,
+            transparent 10px,
+            rgba(0, 0, 0, 0.02) 10px,
+            rgba(0, 0, 0, 0.02) 20px);
+    pointer-events: none;
+}
+
+.institute-logo-small {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 3px solid #1e3a8a;
+    padding: 5px;
+}
+
+.institute-logo-placeholder-small {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #1e3a8a, #3b82f6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    border: 3px solid #1e3a8a;
+}
+
+.institute-name {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #1e3a8a;
+    line-height: 1.3;
+    margin: 0;
+}
+
+.institute-tagline-small {
+    font-size: 0.9rem;
+    color: #1e3a8a;
+    margin: 0;
+}
+
+.main-form-container {
+    min-height: calc(100vh - 300px);
+    padding: 2rem 0;
+}
+
+.form-wrapper {
+    background: #fff;
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.form-title-section {
+    text-align: center;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #e5e7eb;
+}
+
+.form-main-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1e3a8a;
+    margin-bottom: 0.5rem;
+    text-decoration: underline;
+}
+
+.form-step-title {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #dc2626;
+    margin: 0;
+}
+
+
+.progress-indicator {
+    margin: 2rem 0;
+}
+
+.progress-steps {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.step-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.step-number {
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: #e5e7eb;
+    color: #6b7280;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 1.2rem;
+    transition: all 0.3s;
+}
+
+.step-item.active .step-number {
+    background: #3b82f6;
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
+.step-item.completed .step-number {
+    background: #10b981;
+    color: #fff;
+}
+
+.step-label {
+    font-size: 0.85rem;
+    color: #6b7280;
+    font-weight: 500;
+}
+
+.step-item.active .step-label {
+    color: #3b82f6;
+    font-weight: 600;
+}
+
+.step-connector {
+    width: 60px;
+    height: 3px;
+    background: #e5e7eb;
+    transition: all 0.3s;
+}
+
+.step-connector.active {
+    background: #3b82f6;
+}
+
+
+.form-section {
+    margin-bottom: 2rem;
+}
+
+.address-section {
+    margin: 2rem 0;
+}
+
+.section-header-bar {
+    background: #374151;
+    color: #fff;
+    padding: 0.75rem 1rem;
+    border-radius: 4px;
+    margin-bottom: 1rem;
+}
+
+.section-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 0;
+    color: #fff;
+}
+
+.form-label {
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 0.5rem;
+}
+
+.form-label small,
+.form-label .text-danger {
+    font-weight: 400;
+    font-size: 0.85rem;
+}
+
+.form-control,
+.form-select {
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    transition: all 0.3s;
+}
+
+.form-control:focus,
+.form-select:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.form-control.is-invalid,
+.form-select.is-invalid {
+    border-color: #dc2626;
+}
+
+.invalid-feedback {
+    display: block;
+    color: #dc2626;
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+}
+
+
+.fees-section {
+    background: #f9fafb;
+    padding: 1rem;
+    border-radius: 4px;
+    border: 1px solid #e5e7eb;
+}
+
+
+.upload-section {
+    background: #f9fafb;
+    padding: 1.5rem;
+    border-radius: 4px;
+    border: 1px solid #e5e7eb;
+}
+
+.preview-image {
+    width: 132px;
+    height: 170px;
+    object-fit: contain;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 2px;
+    background: #fff;
+}
+
+/* Education Table */
+.education-section .table {
+    font-size: 0.9rem;
+}
+
+.education-section .table th {
+    background: #f3f4f6;
+    font-weight: 600;
+    text-align: center;
+    vertical-align: middle;
+    padding: 0.75rem 0.5rem;
+    font-size: 0.85rem;
+}
+
+.education-section .table td {
+    vertical-align: middle;
+    padding: 0.5rem;
+}
+
+.education-section .table input,
+.education-section .table select {
+    font-size: 0.85rem;
+    padding: 0.375rem 0.5rem;
+}
+
+/* Payment Page */
+.payment-page {
+    background: #f9fafb;
+    padding: 2rem;
+    border-radius: 8px;
+}
+
+.registration-details {
+    background: #fff;
+    padding: 1.5rem;
+    border-radius: 4px;
+    border: 1px solid #e5e7eb;
+}
+
+.form-control-plaintext {
+    font-size: 1rem;
+    padding: 0.5rem 0;
+    color: #374151;
+}
+
+.payment-note {
+    margin-top: 1.5rem;
+}
+
+/* Buttons */
+.btn {
+    border-radius: 4px;
+    font-weight: 600;
+    padding: 0.625rem 1.5rem;
+    transition: all 0.3s;
+}
+
+.btn-primary {
+    background: #dc2626;
+    border-color: #dc2626;
+}
+
+.btn-primary:hover {
+    background: #b91c1c;
+    border-color: #b91c1c;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);
+}
+
+.btn-danger {
+    background: #dc2626;
+    border-color: #dc2626;
+}
+
+.btn-danger:hover {
+    background: #b91c1c;
+    border-color: #b91c1c;
+}
+
+.btn-warning {
+    background: #f59e0b;
+    border-color: #f59e0b;
+    color: #fff;
+}
+
+.btn-warning:hover {
+    background: #d97706;
+    border-color: #d97706;
+    color: #fff;
+}
+
+.btn-lg {
+    padding: 0.75rem 2rem;
+    font-size: 1.1rem;
+}
+
+.btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Form Actions */
+.form-actions {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #e5e7eb;
+}
+
+/* Alert Container */
+#alertContainer {
+    margin-bottom: 1.5rem;
+}
+
+.alert {
+    border-radius: 4px;
+    padding: 1rem;
+}
+
+.registration-details .detail-line {
+    padding: 0.35rem 0;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+    font-size: 0.95rem;
+}
+
+.registration-details .detail-line .detail-label {
+    font-weight: 600;
+    color: #475569;
+    margin-right: 0.5rem;
+}
+
+.registration-details .detail-line .detail-value {
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.registration-details .detail-line.detail-fee .detail-value {
+    font-size: 1.25rem;
+}
+
+/* Footer */
+footer {
+    background: #1e3a8a !important;
+    margin-top: 2rem;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .form-wrapper {
+        padding: 1rem;
+    }
+
+    .form-main-title {
+        font-size: 1.2rem;
+    }
+
+    .form-step-title {
+        font-size: 1rem;
+    }
+
+    .progress-steps {
+        gap: 0.5rem;
+    }
+
+    .step-number {
+        width: 40px;
+        height: 40px;
+        font-size: 1rem;
+    }
+
+    .step-connector {
+        width: 30px;
+    }
+
+    .step-label {
+        font-size: 0.75rem;
+    }
+
+    .education-section .table {
+        font-size: 0.75rem;
+    }
+
+    .education-section .table th,
+    .education-section .table td {
+        padding: 0.375rem 0.25rem;
+    }
+
+    .form-actions {
+        flex-direction: column;
+    }
+
+    .form-actions .btn {
+        width: 100%;
+        margin: 0;
+    }
+}
+
+/* Loading Spinner */
+.spinner-border-sm {
+    width: 1rem;
+    height: 1rem;
+    border-width: 0.15em;
+}

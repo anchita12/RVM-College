@@ -1,0 +1,481 @@
+<?php
+/**
+ * Crosslist Functions
+ * Centralized logic for database retrieval and rendering.
+ * Following DRY principles.
+ */
+
+/**
+ * Fetch students and their marks for a specific course and session.
+ */
+function fetch_crosslist_data($db, $course_id) {
+    // 1. Fetch Students
+    $sql = "SELECT esi.sno as exam_sno, esi.student_name, esi.exam_roll_no, esi.uin_no, esi.result_srno,
+                   si.father_name, si.mother_name, si.gender,
+                   cd.class_description, cd.semester, cd.category
+            FROM exam_student_info esi
+            LEFT JOIN student_info si ON esi.student_info_sno = si.sno
+            LEFT JOIN class_detail cd ON esi.course_name = cd.sno
+            WHERE esi.course_name = '$course_id' AND esi.verify_status=1
+            ORDER BY esi.exam_roll_no ASC";
+    
+    $res = mysqli_query($db, $sql);
+    $data = [];
+    while ($row = mysqli_fetch_assoc($res)) {
+        // Fetch Marks for each student
+        $marks_sql = "SELECT espi.*, asp.paper_code, asp.paper_title, asp.theory_practical,
+                             asp.max_marks, asp.mid_sem_max_marks, asp.practical_max_marks,
+                             asp.has_theory, asp.has_internal, asp.has_practical,
+                             asp.academic_credit as credit, asp.paper_type
+                    FROM exam_student_paper_info espi
+                    JOIN add_subject_papers asp ON espi.add_subject_papers_sno = asp.sno
+                    WHERE espi.exam_student_info_sno = '" . $row['exam_sno'] . "'
+                    ORDER BY FIELD(LOWER(asp.paper_type),'major','minor','practical'), asp.paper_code ASC";
+        
+        $marks_res = mysqli_query($db, $marks_sql);
+        $marks = [];
+        while ($m = mysqli_fetch_assoc($marks_res)) {
+            $marks[] = $m;
+        }
+        $row['papers'] = $marks;
+        $data[] = $row;
+    }
+    
+    return $data;
+}
+
+/**
+ * Fetch class details for header.
+ */
+function get_class_details($db, $course_id) {
+    $sql = "SELECT * FROM class_detail WHERE sno = '$course_id'";
+    $res = mysqli_query($db, $sql);
+    return mysqli_fetch_assoc($res);
+}
+
+/**
+ * Render the Crosslist HTML.
+ * Used for both Preview and PDF generation.
+ */
+function render_crosslist_html($students, $class_info, $is_pdf = false) {
+    global $db;
+    ob_start();
+    $exam_session = (date('Y') - 1) . '-' . date('Y');
+    ?>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Exam Crosslist - RvM</title>
+        <style>
+            <?php if ($is_pdf): ?>
+            @page {
+                size: A3 landscape;
+                margin: 40mm 10mm 20mm 10mm;
+            }
+            .header-info { 
+                position: fixed; 
+                top: -35mm; 
+                left: 0; 
+                right: 0; 
+                height: 30mm; 
+                text-align: center;
+                background: white;
+            }
+            body { padding-top: 0; }
+            * { -webkit-print-color-adjust: exact !important; color-adjust: exact !important; }
+            <?php else: ?>
+            @media print {
+                @page {
+                    size: A3 landscape;
+                    margin: 5mm;
+                }
+                body { font-size: 10px; }
+                .noprint { display: none; }
+                * { -webkit-print-color-adjust: exact !important; }
+            }
+            <?php endif; ?>
+            body { font-family: 'DejaVu Sans', sans-serif; margin: 0; padding: 10px; font-size: 11px; }
+            .header-info h1 { font-size: 18px; margin: 5px 0; border-bottom: 2px solid #000; display: inline-block; padding-bottom: 5px; }
+            .header-info h2 { font-size: 14px; margin: 5px 0; }
+            
+            .student-record { 
+                width: 100%; 
+                border: 1px solid black; 
+                margin-bottom: 15px; 
+                page-break-inside: avoid;
+                border-collapse: collapse;
+            }
+            
+            .student-record td { border: 1px solid black; vertical-align: top; padding: 2px; }
+            
+            .info-table { width: 100%; border: none !important; }
+            .info-table td { border: none !important; text-align: left; font-size: 11px; padding: 1px 5px; }
+            .info-table b { display: inline-block; width: 110px; }
+            
+            .marks-grid { width: 100%; border-collapse: collapse; }
+            .marks-grid th, .marks-grid td { border: 1px solid black; font-size: 10px; padding: 2px; text-align: center; }
+            .marks-grid th { font-weight: bold; background-color: #dddddd; color: #000; }
+            .marks-grid tr.total-row { background-color: #f5f5f5; font-weight: bold; }
+            .marks-grid .subject-name { text-align: left; width: 180px; }
+            
+            .result-table { width: 100%; border: none !important; }
+            .result-table td { border: none !important; text-align: center; font-size: 11px; font-weight: bold; padding: 5px 0; }
+            
+            .footer { margin-top: 30px; width: 100%; }
+            .footer-col { width: 50%; float: left; text-align: center; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="header-info">
+            <?php 
+            $sql = "SELECT * FROM college_settings WHERE id = 1 LIMIT 1";
+            $sets_res = mysqli_query($db, $sql);
+            $settings = mysqli_fetch_assoc($sets_res);
+            $college_name = $settings['college_name'] ?? 'Raghuveer Mahavidyalaya Thaloi, Bhikharipur Kala, Jaunpur (U.P.)';
+            $tagline = $settings['tagline'] ?? '';
+            $logo = $settings['p_logo'] ?? 'images/logo.png';
+            $logo_path = $logo;
+            
+            // For PDF, we need absolute path for local files
+            if ($is_pdf) {
+                $base_dir = realpath(__DIR__ . '/../') . DIRECTORY_SEPARATOR;
+                
+                $clean_logo = ltrim($logo, './');
+                if (file_exists($base_dir . $clean_logo)) {
+                    $logo_path = $base_dir . $clean_logo;
+                } elseif (file_exists($base_dir . $logo)) {
+                    $logo_path = $base_dir . $logo;
+                } elseif (file_exists('images/logo.png' . $clean_logo)) {
+                    $logo_path = 'images/logo.png' . $clean_logo;
+                }
+            } else {
+                if (!file_exists($logo) && file_exists('../' . $logo)) $logo_path = '../' . $logo;
+            }
+            ?>
+            <table width="100%">
+                <tr>
+                    <?php if (!$is_pdf): ?>
+                    <td width="15%" style="border:none;"><img src="<?= $logo_path ?>" style="height:70px;" alt="Logo"></td>
+                    <td width="70%" style="border:none; text-align:center;">
+                    <?php else: ?>
+                    <td width="100%" style="border:none; text-align:center;">
+                    <?php endif; ?>
+                        <h1 style="border:none; margin:0; padding:0;"><?= strtoupper($college_name) ?></h1>
+                        <p style="margin:2px 0; font-weight:bold;"><?= $tagline ?></p>
+                        <h3 style="margin:5px 0;">CROSS LIST OF <?= strtoupper($class_info['class_description']) ?> MAIN EXAMINATION SESSION : <?= $exam_session ?></h3>
+                    </td>
+                    <?php if (!$is_pdf): ?>
+                    <td width="15%" style="border:none;"></td>
+                    <?php endif; ?>
+                </tr>
+            </table>
+        </div>
+
+        <?php 
+        $registered = count($students);
+        $absent_count = 0;
+        $pass_count = 0;
+        $atkt_count = 0;
+        $fail_count = 0;
+        $paper_stats = []; // code => [title, appeared, pass]
+
+        foreach ($students as $index => $stu): 
+            $is_absent_all = true;
+            $failed_papers = [];
+            $total_credits = 0;
+            $total_cgp = 0;
+            $total_max = 0;
+            $total_obt = 0;
+            $any_atkt = false;
+        ?>
+            <table class="student-record">
+                <tr>
+                    <!-- LEFT COLUMN: Student Details -->
+                    <td width="25%">
+                        <table class="info-table">
+                            <tr><td style="font-size:11px;"><b>S.No:</b> <?= $index + 1 ?></td></tr>
+                            <tr><td>&nbsp;</td></tr>
+                            <tr><td><b>ROLL NO.</b> <?= $stu['exam_roll_no'] ?></td></tr>
+                            <tr><td><b>UIN No.</b> <?= $stu['uin_no'] ?></td></tr>
+                            <tr><td><b>STUDENT NAME</b> <?= strtoupper($stu['student_name']) ?></td></tr>
+                            <tr><td><b>FATHER NAME</b> <?= strtoupper($stu['father_name']) ?></td></tr>
+                            <tr><td><b>MOTHER NAME</b> <?= strtoupper($stu['mother_name']) ?></td></tr>
+                            <tr><td><b>SL. NO.</b> <?= $stu['result_srno'] ?></td></tr>
+                        </table>
+                    </td>
+
+                    <!-- CENTER COLUMN: Marks Grid -->
+                    <td width="63%">
+                        <?php
+                        // Pre-scan this student's papers to decide which columns to show
+                        $show_int = false; $show_ext = false; $show_prc = false;
+                        foreach ($stu['papers'] as $_p) {
+                            if ($_p['has_internal'] == 1) $show_int = true;
+                            if ($_p['has_theory']   == 1) $show_ext = true;
+                            if ($_p['has_practical']== 1) $show_prc = true;
+                        }
+                        ?>
+                        <table class="marks-grid">
+                            <thead>
+                                <tr>
+                                    <th>TYPE</th>
+                                    <th>CODE</th>
+                                    <th class="subject-name">SUBJECT NAME</th>
+                                    <th>CREDIT</th>
+                                    <?php if ($show_int): ?><th>INT MAX</th><th>OBT INT</th><?php endif; ?>
+                                    <?php if ($show_ext): ?><th>EXT MAX</th><th>OBT EXT</th><?php endif; ?>
+                                    <?php if ($show_prc): ?><th>PRC MAX</th><th>OBT PRC</th><?php endif; ?>
+                                    <th>TOTAL</th>
+                                    <th>LG</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php 
+                                $total_credits = 0;
+                                $earned_credits = 0;
+                                $total_cgp = 0;
+                                 $total_max = 0;
+                                 $total_obt = 0;
+                                 $total_int = 0;
+                                 $total_ext = 0;
+                                 $total_prc = 0;
+                                 $total_int_max = 0;
+                                 $total_ext_max = 0;
+                                 $total_prc_max = 0;
+                                 $total_gp = 0;
+                                 $failed_papers = [];
+
+                                foreach ($stu['papers'] as $paper): 
+                                    $p_max = (float)$paper['max_marks'] + (float)$paper['mid_sem_max_marks'] + (float)$paper['practical_max_marks'];
+                                    $p_obt = (float)$paper['marks_obt'] + (float)$paper['mid_sem_marks_obt'] + (float)$paper['practical_marks_obt'];
+                                    
+                                    // Helper for dash display
+                                    $show_mark = function($val, $flag) {
+                                        if ($flag == 0) return '-';
+                                        return ($val === null || $val === '') ? '-' : $val;
+                                    };
+
+                                    // DB field mapping (verified from marks_entry_form.php):
+                                    // INT (has_internal): max_marks       <-> marks_obt
+                                    // EXT (has_theory):  mid_sem_max_marks <-> mid_sem_marks_obt
+                                    // PRC (has_practical): practical_max_marks <-> practical_marks_obt
+                                    $obt_int = $show_mark($paper['marks_obt'],         $paper['has_internal']);
+                                    $obt_ext = $show_mark($paper['mid_sem_marks_obt'],  $paper['has_theory']);
+                                    $obt_prc = $show_mark($paper['practical_marks_obt'],$paper['has_practical']);
+
+                                    // Basic Grade Logic (simplified for RvM)
+                                    $percent = ($p_max > 0) ? ($p_obt / $p_max) * 100 : 0;
+                                    $grade_point = 0;
+                                    $letter_grade = 'F';
+                                    
+                                    if ($percent >= 91) { $grade_point = 10; $letter_grade = 'O'; }
+                                    elseif ($percent >= 81) { $grade_point = 9; $letter_grade = 'A+'; }
+                                    elseif ($percent >= 71) { $grade_point = 8; $letter_grade = 'A'; }
+                                    elseif ($percent >= 61) { $grade_point = 7; $letter_grade = 'B+'; }
+                                    elseif ($percent >= 51) { $grade_point = 6; $letter_grade = 'B'; }
+                                    elseif ($percent >= 41) { $grade_point = 5; $letter_grade = 'C'; }
+                                    elseif ($percent >= 33) { $grade_point = 4; $letter_grade = 'D'; }
+                                    
+                                    $p_credit = (float)$paper['credit'] ?: 4; // Default to 4 if missing
+                                    $p_cgp = $p_credit * $grade_point;
+                                    
+                                    $total_credits += $p_credit;
+                                    $total_max     += $p_max;
+                                    $total_obt     += $p_obt;
+                                    $total_int     += (float)$paper['marks_obt'];          // INT = marks_obt
+                                    $total_ext     += (float)$paper['mid_sem_marks_obt'];   // EXT = mid_sem_marks_obt
+                                    $total_prc     += (float)$paper['practical_marks_obt'];
+                                    $total_int_max += $paper['has_internal'] ? (float)$paper['max_marks']           : 0;
+                                    $total_ext_max += $paper['has_theory']   ? (float)$paper['mid_sem_max_marks']   : 0;
+                                    $total_prc_max += $paper['has_practical'] ? (float)$paper['practical_max_marks'] : 0;
+                                    $total_gp += $grade_point;
+                                    $total_cgp += $p_cgp;
+                                    if ($grade_point >= 4) { $earned_credits += $p_credit; }
+                                    else { $failed_papers[] = $paper['paper_code']; }
+                                ?>
+                                    <?php
+                                        $pt = strtolower(trim($paper['paper_type'] ?? ''));
+                                        if ($pt === 'minor') $type_label = 'Minor';
+                                        elseif ($pt === 'practical') $type_label = 'Practical';
+                                        else $type_label = 'Major';
+                                    ?>
+                                    <tr>
+                                        <td><?= $type_label ?></td>
+                                        <td><?= $paper['paper_code'] ?></td>
+                                        <td class="subject-name"><?= strtoupper($paper['paper_title']) ?></td>
+                                        <td><?= $p_credit ?></td>
+                                        <?php if ($show_int): ?>
+                                            <td><?= ($paper['has_internal']  ? (int)$paper['max_marks']           : '-') ?></td>
+                                            <td><?= $obt_int ?></td>
+                                        <?php endif; ?>
+                                        <?php if ($show_ext): ?>
+                                            <td><?= ($paper['has_theory']    ? (int)$paper['mid_sem_max_marks']   : '-') ?></td>
+                                            <td><?= $obt_ext ?></td>
+                                        <?php endif; ?>
+                                        <?php if ($show_prc): ?>
+                                            <td><?= ($paper['has_practical'] ? (int)$paper['practical_max_marks'] : '-') ?></td>
+                                            <td><?= $obt_prc ?></td>
+                                        <?php endif; ?>
+                                        <td><?= (int)$p_obt ?></td>
+                                        <td><?= $letter_grade ?></td>
+                                    </tr>
+                                    <?php 
+                                        // Track paper stats
+                                        if (!isset($paper_stats[$paper['paper_code']])) {
+                                            $paper_stats[$paper['paper_code']] = [
+                                                'title'   => $paper['paper_title'],
+                                                'int_max' => (float)$paper['max_marks'],           // INT = max_marks
+                                                'ext_max' => (float)$paper['mid_sem_max_marks'],    // EXT = mid_sem_max_marks
+                                                'prc_max' => (float)$paper['practical_max_marks'],
+                                                'obt_int' => 0,
+                                                'obt_ext' => 0,
+                                                'obt_prc' => 0,
+                                            ];
+                                        }
+                                        $is_absent_all = false;
+                                        $paper_stats[$paper['paper_code']]['obt_int'] += (float)$paper['marks_obt'];
+                                        $paper_stats[$paper['paper_code']]['obt_ext'] += (float)$paper['mid_sem_marks_obt'];
+                                        $paper_stats[$paper['paper_code']]['obt_prc'] += (float)$paper['practical_marks_obt'];
+                                    ?>
+                                <?php endforeach; ?>
+                                <tr style="font-weight:bold; background:#f9f9f9;">
+                                    <td colspan="3" style="text-align:right;">TOTAL</td>
+                                    <td><?= $total_credits ?></td>
+                                    <?php if ($show_int): ?>
+                                        <td><?= (int)$total_int_max ?></td>
+                                        <td><?= (int)$total_int ?></td>
+                                    <?php endif; ?>
+                                    <?php if ($show_ext): ?>
+                                        <td><?= (int)$total_ext_max ?></td>
+                                        <td><?= (int)$total_ext ?></td>
+                                    <?php endif; ?>
+                                    <?php if ($show_prc): ?>
+                                        <td><?= (int)$total_prc_max ?></td>
+                                        <td><?= (int)$total_prc ?></td>
+                                    <?php endif; ?>
+                                    <td><?= (int)$total_obt ?></td>
+                                    <td></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </td>
+
+                    <!-- RIGHT COLUMN: Totals & Result -->
+                    <td width="12%">
+                        <?php $marks_sgpa = ($total_max > 0) ? number_format(($total_obt / $total_max) * 10, 2) : '0.00'; ?>
+                        <table class="result-table">
+                            <tr><td>GRAND TOTAL</td></tr>
+                            <tr><td style="font-size:12px; border-bottom:1px solid #000 !important;"><?= (int)$total_obt ?> / <?= (int)$total_max ?></td></tr>
+                            <tr><td>SGPA</td></tr>
+                            <tr><td style="font-size:12px;"><?= $marks_sgpa ?></td></tr>
+                            <tr><td>CGPA</td></tr>
+                            <tr><td style="font-size:12px;"><?= $marks_sgpa ?></td></tr>
+                            <tr><td>RESULT</td></tr>
+                            <tr><td style="color: <?= empty($failed_papers) ? 'green' : 'red' ?>;">
+                                <?= empty($failed_papers) ? 'PASSED' : 'ATKT/FAIL' ?>
+                            </td></tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+            
+            <?php 
+            // Finalize student stats
+            if ($is_absent_all) $absent_count++;
+            if (empty($failed_papers) && !$is_absent_all) {
+                $pass_count++;
+            } elseif (!$is_absent_all) {
+                // Determine if ATKT (failed in some papers but not all)
+                if (count($failed_papers) <= 2) { $atkt_count++; }
+                else { $fail_count++; }
+            }
+            ?>
+            
+            <?php if (($index + 1) % 3 == 0 && $index < count($students) - 1): ?>
+                <div style="page-break-after: always;"></div>
+            <?php endif; ?>
+        <?php endforeach; ?>
+
+        <div class="footer-summaries" style="margin-top:20px; page-break-inside:avoid;">
+            <div style="display:flex; gap:20px;">
+                <!-- Paper Stats -->
+                <div style="flex:2;">
+                    <?php
+                    // Check which max columns have data in summary
+                    $sum_has_int = false; $sum_has_ext = false; $sum_has_prc = false;
+                    foreach ($paper_stats as $s) {
+                        if ($s['int_max'] > 0) $sum_has_int = true;
+                        if ($s['ext_max'] > 0) $sum_has_ext = true;
+                        if ($s['prc_max'] > 0) $sum_has_prc = true;
+                    }
+                    ?>
+                    <table class="marks-grid" style="width:100%;">
+                        <thead>
+                            <tr>
+                                <th>PAPER CODE</th>
+                                <th>PAPER NAME</th>
+                                <?php if ($sum_has_int): ?><th>INT MAX</th><?php endif; ?>
+                                <?php if ($sum_has_ext): ?><th>EXT MAX</th><?php endif; ?>
+                                <?php if ($sum_has_prc): ?><th>PRC MAX</th><?php endif; ?>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($paper_stats as $code => $s): ?>
+                                <tr>
+                                    <td><?= $code ?></td>
+                                    <td style="text-align:left;"><?= $s['title'] ?></td>
+                                    <?php if ($sum_has_int): ?><td><?= ($s['int_max'] > 0 ? (int)$s['int_max'] : '-') ?></td><?php endif; ?>
+                                    <?php if ($sum_has_ext): ?><td><?= ($s['ext_max'] > 0 ? (int)$s['ext_max'] : '-') ?></td><?php endif; ?>
+                                    <?php if ($sum_has_prc): ?><td><?= ($s['prc_max'] > 0 ? (int)$s['prc_max'] : '-') ?></td><?php endif; ?>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Result Stats -->
+                <div style="flex:1;">
+                    <h4 style="margin:5px 0;">RESULT SUMMARY</h4>
+                    <table class="marks-grid" style="width:100%;">
+                        <thead>
+                            <tr>
+                                <th>REGISTERED</th>
+                                <th>ABSENT</th>
+                                <th>APPEARED</th>
+                                <th>PASS</th>
+                                <th>ATKT</th>
+                                <th>FAIL</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><?= $registered ?></td>
+                                <td><?= $absent_count ?></td>
+                                <td><?= $registered - $absent_count ?></td>
+                                <td><?= $pass_count ?></td>
+                                <td><?= $atkt_count ?></td>
+                                <td><?= $fail_count ?></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div style="margin-top:15px; font-size:9px; border:1px solid #000; padding:10px;">
+                <b>NOTE:</b><br>
+                1. EQUIVALENT PERCENTAGE OF MARKS = CGPA * 10.<br>
+                2. THE MINIMUM PASSING STANDARD FOR A SUBJECT SHALL BE 33% i.e. 33 MARKS OUT OF 100 MARKS (WHEREVER APPLICABLE).<br>
+                3. FOR A COMPLETED COURSE, CGPA SHALL BE CALCULATED AS THE WEIGHTED AVERAGE OF ALL SEMESTERS.
+            </div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-col">DATE OF RESULT: <?= date('d-m-Y') ?></div>
+            <div class="footer-col">CONTROLLER OF EXAMINATIONS</div>
+            <div style="clear:both;"></div>
+        </div>
+    </body>
+    </html>
+    <?php
+    return ob_get_clean();
+}

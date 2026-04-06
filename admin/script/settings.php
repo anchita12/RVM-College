@@ -1,0 +1,1912 @@
+<?php
+/* ================================
+   DATABASE CONNECTION
+================================ */
+// $db = mysqli_connect("localhost", "root", "mysql", "cloudice_Raghuveer_2025");
+$db = mysqli_connect("localhost", "root", "mysql", "rvm_jaunpur3");
+if (!$db) {
+    die("DB Connection Failed: " . mysqli_connect_error());
+}
+
+
+/* ================================
+   HELPER FUNCTIONS
+================================ */
+if (!function_exists('generate_invoice_no')) {
+    function generate_invoice_no($type, $date) {
+        return strtoupper(substr($type, 0, 3)) . date('YmdHis');
+    }
+}
+if (!function_exists('gen_epin')) {
+    function gen_epin() {
+        return rand(100000, 999999);
+    }
+}
+if (!function_exists('get_session_by_date')) {
+    function get_session_by_date($date) {
+        $time = strtotime($date);
+        $month = date("m", $time);
+        $year = date("Y", $time);
+        if ($month >= 1 && $month <= 3) {
+            return ($year - 1) . '-' . $year;
+        } else {
+            return $year . '-' . ($year + 1);
+        }
+    }
+}
+if (!function_exists('handleImageUpload')) {
+    function handleImageUpload($file, $targetPath) {
+        if (!empty($file['name'])) {
+            $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+            
+            // Validate Extension
+            if (!in_array($ext, ['jpg', 'jpeg', 'png', 'webp'])) {
+                die("Error: Only JPG/JPEG/PNG files are allowed. Format found: $ext");
+            }
+
+            // Create Image Resource
+            $sourceImage = null;
+            if ($ext == 'jpg' || $ext == 'jpeg') {
+                $sourceImage = imagecreatefromjpeg($file['tmp_name']);
+            } elseif ($ext == 'png') {
+                $sourceImage = imagecreatefrompng($file['tmp_name']);
+            } elseif ($ext == 'webp') {
+                $sourceImage = imagecreatefromwebp($file['tmp_name']);
+            }
+
+            if ($sourceImage) {
+                // Remove existing file if it exists
+                if(file_exists($targetPath)) unlink($targetPath);
+                
+                // Save as JPEG (Quality 90)
+                // Note: TargetPath should end in .jpg implicitly based on naming logic, 
+                // but even if not, we are saving JPEG content.
+                $result = imagejpeg($sourceImage, $targetPath, 90);
+                
+                // Free memory
+                imagedestroy($sourceImage);
+                
+                return $result;
+            } else {
+                // Fallback (e.g. if GD fails or invalid image)
+                 die("Error: Failed to process image.");
+            }
+        }
+        return false;
+    }
+}
+
+if (!function_exists('assignStudentFees')) {
+    function assignStudentFees($student_id, $class_id, $admission_date, $selected_ids = null) {
+        global $db;
+        $session = get_session_by_date($admission_date);
+
+        // Fetch Student Attributes for Criteria Matching
+        $stuQ = $db->query("SELECT s.gender, s.category, s.subject_type, s.income_group, 
+                                   g.gender_name, c.category_name 
+                            FROM student_info s
+                            LEFT JOIN genders g ON s.gender = g.gender_sno
+                            LEFT JOIN categories c ON s.category = c.categories_sno
+                            WHERE s.sno='$student_id'");
+        
+        $gender = 'All'; $category = 'All'; $sub_type = 'Aided'; $inc_group = 'General';
+        
+        if($stuQ && $stuQ->num_rows > 0) {
+            $sRow = $stuQ->fetch_assoc();
+            
+            // Gender Logic
+            if(!empty($sRow['gender_name'])) {
+                $gender = strtoupper($sRow['gender_name']);
+            } elseif(!empty($sRow['gender'])) {
+                 $gVal = strtoupper($sRow['gender']);
+                 if($gVal == '1') $gender = 'MALE';
+                 elseif($gVal == '2') $gender = 'FEMALE';
+                 elseif($gVal == '3') $gender = 'TRANSGENDER';
+                 else $gender = $gVal;
+            }
+            
+            // Category Logic
+            $category = !empty($sRow['category_name']) ? $sRow['category_name'] : ($sRow['category'] ?? 'All');
+            
+            // New Criteria
+            $sub_type = $sRow['subject_type'] ?? 'Aided';
+            $inc_group = $sRow['income_group'] ?? 'General';
+        }
+
+        $critWhere = " AND (criteria_gender = 'All' OR criteria_gender = '$gender')
+                        AND (criteria_category = 'All' OR criteria_category = '$category')
+                        AND (criteria_subject_type = 'All' OR criteria_subject_type = '$sub_type')
+                        AND (criteria_income_group = 'All' OR criteria_income_group = '$inc_group')";
+
+        // JOIN fee_heads again
+        $sql = "SELECT fs.id, fs.amount, fh.head_name, fh.is_mandatory 
+                FROM fee_structure fs 
+                JOIN fee_heads fh ON fs.fee_head_id = fh.id
+                WHERE fs.class_id='$class_id' AND fs.academic_session='$session' AND fs.status=1 $critWhere";
+
+        
+        // Filter by Selected IDs if provided
+        if (is_array($selected_ids)) {
+             if(empty($selected_ids)) {
+                 $sql .= " AND 1=0"; // Select nothing
+             } else {
+                 $ids_str = implode(',', array_map('intval', $selected_ids));
+                 $sql .= " AND fs.id IN ($ids_str)";
+             }
+        }
+        
+        $res = mysqli_query($db, $sql);
+        
+        if($res) {
+            while ($row = mysqli_fetch_assoc($res)) {
+                $check = mysqli_query($db, "SELECT sno FROM fee_invoice WHERE student_id='$student_id' AND fee_structure_id='".$row['id']."'");
+                if (mysqli_num_rows($check) == 0) {
+                    $ins = "INSERT INTO fee_invoice 
+                            (student_id, fee_structure_id, class_id, amount_paid, status, fee_session)
+                            VALUES 
+                            ('$student_id', '".$row['id']."', '$class_id', 0, 0, '$session')";
+                    mysqli_query($db, $ins);
+                }
+            }
+        }
+    }
+}
+
+// Centralized Fee Payment Processor
+// Centralized Fee Payment Processor
+function processStudentPayment($student_id, $amount_paying, $details = []) {
+    global $db;
+    
+    // safe inputs
+    $sno = intval($student_id);
+    $rem_pay = floatval($amount_paying);
+    
+    // Default Metadata
+    $doa = $details['payment_date'] ?? date('Y-m-d');
+    $mode = $details['mode'] ?? 'cash';
+    $type = $details['type'] ?? ''; // payment_method_type
+    $utr = $details['utr'] ?? '';
+    $chq = $details['chq_no'] ?? '';
+    $chq_date = isset($details['cheque_date']) && $details['cheque_date'] ? "'".$details['cheque_date']."'" : "NULL";
+    $txn_date = isset($details['txn_date']) && $details['txn_date'] ? "'".$details['txn_date']."'" : "NULL";
+    $remarks = $details['remarks'] ?? '';
+    $uid = $_SESSION['user_id'] ?? 0; // Assuming session is started
+    $sess = $details['session'] ?? ''; // Fee Session
+    
+    // 1. Fetch Invoices JOIN Fee Structure (To get Due Amount)
+    // We fetch ALL active invoices (status < 2)
+    // Order by SNO (FIFO) for payment
+    $sql = "SELECT fi.sno, fi.amount_paid, fs.amount as struct_amount 
+            FROM fee_invoice fi 
+            JOIN fee_structure fs ON fi.fee_structure_id = fs.id
+            WHERE fi.student_id='$sno' AND fi.status < 2
+            ORDER BY fi.sno ASC";
+            
+    $q = mysqli_query($db, $sql);
+    $rows = [];
+    while($r = mysqli_fetch_assoc($q)) $rows[] = $r;
+    
+    // --- PASS 1: PAYMENT Only ---
+    // (Discount is now handled in student_info globally, not per invoice row)
+
+    
+    if($rem_pay > 0) {
+        foreach($rows as $row) {
+             if($rem_pay <= 0) break;
+             
+            $total = floatval($row['struct_amount']);
+            $paid = floatval($row['amount_paid']);
+            $due = $total - $paid; // No discount column here
+            
+            if($due > 0) {
+                $apply = min($rem_pay, $due);
+                
+                // Calc New Status
+                $new_paid = $paid + $apply;
+                // Status 2 only if FULLY matched struct amount. 
+                // If discount covers the rest, status logic logic must happen elsewhere or we accept it stays 1.
+                // For now, based on schema, 2 = Paid Full matching Amount.
+                $status = ($new_paid >= $total) ? 2 : 1;
+                
+                // Update DB
+                $iid = $row['sno'];
+                $upd = "UPDATE fee_invoice SET 
+                        amount_paid = amount_paid + $apply,
+                        status = '$status',
+                        payment_date = '$doa',
+                        mode_of_payment = '$mode',
+                        payment_method_type = '$type',
+                        utr_number = '$utr',
+                        chq_no = '$chq',
+                        cheque_date = $chq_date,
+                        txn_date = $txn_date,
+                        remarks = '$remarks',
+                        user_id = '$uid'";
+                        
+                if($sess) $upd .= ", fee_session='$sess'";
+                
+                $upd .= " WHERE sno='$iid'";
+                
+                mysqli_query($db, $upd);
+                
+                $rem_pay -= $apply;
+            }
+        }
+    }
+}
+
+
+function sidebar()
+{
+    global $db;
+?>
+<?php
+function getMenuTree($db) {
+    $items = [];
+    $sql = "SELECT * FROM menu_master WHERE is_active = 1 ORDER BY sort_order ASC";
+    $res = mysqli_query($db, $sql);
+
+    while ($row = mysqli_fetch_assoc($res)) {
+        $items[$row['id']] = $row;
+        $items[$row['id']]['children'] = [];
+    }
+
+    $tree = [];
+
+    foreach ($items as $id => &$item) {
+        if ($item['parent_id'] == 0) {
+            $tree[] = &$item;
+        } else {
+            if (isset($items[$item['parent_id']])) {
+                $items[$item['parent_id']]['children'][] = &$item;
+            }
+        }
+    }
+    return $tree;
+}
+
+$menu_items = getMenuTree($db);
+?>
+
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <title>Raghuveer Mahavidyalaya</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cairo:wght@200;300;400;600;700;900&display=swap"
+      rel="stylesheet"
+    />
+	<link rel="stylesheet"
+          href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="build/css/tailwind.css" />
+    <script src="https://cdn.jsdelivr.net/gh/alpine-collective/alpine-magic-helpers@0.5.x/dist/component.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/alpinejs/alpine@v2.7.3/dist/alpine.min.js" defer></script>
+	<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<style>
+/* Header styles */
+.erp-header {
+    width: 100%;
+    background-color: #1f3e8f;
+    color: #fff;
+    padding: 7px 20px; /* FIXED */
+}
+
+/* Welcome section styles */
+.erp-welcome {
+    text-align: center;
+    margin-top: 10px;
+}
+
+.erp-welcome p {
+    margin: 4px 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: white;
+}
+
+.erp-welcome hr {
+    border: 0;
+    height: 1px;
+    background-color: #007bff;
+    width: 50%;
+    margin: 5px auto;
+}
+
+/* Sidebar menu item */
+nav a {
+    display: flex;
+    align-items: center;
+    padding: 8px 0px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    transition: all 0.25s ease;
+}
+
+/* Hover effect */
+nav a:hover {
+    background-color: #e0e7ff;
+    border-color: #3b82f6;
+    transform: scale(1.02);
+    box-shadow: 0 3px 8px rgba(0,0,0,0.18);
+}
+
+/* Child menu */
+nav div > a {
+    margin-left: 6px;
+}
+
+nav div > a:hover {
+    background-color: #dbeafe;
+    border-color: #2563eb;
+}
+/* Submenu container */
+.child-menu {
+    margin-left: 10px; /* optional indentation */
+}
+
+/* Submenu link */
+.child-menu .submenu-link {
+    display: flex;
+    align-items: center;
+    padding: 8px 10px;
+    border-radius: 6px;
+    color: #000;
+    text-decoration: none;
+    transition: all 0.3s ease;
+}
+
+/* Submenu hover effect */
+.child-menu .submenu-link:hover {
+    background-color:#D9E2FA; /* light pink */
+    color: black;           /* dark pink */
+    transform: translateX(3px); /* slight slide effect */
+	box-shadow: 0 3px 6px rgba(33, 65, 148, 0.15);
+
+}
+
+/* Submenu icon color change on hover */
+.child-menu .submenu-link:hover .icon {
+    color: black; /* pink for icon */
+}
+
+</style>
+</head>
+
+<body>
+<div x-data="setup()" x-init="$refs.loading.classList.add('hidden'); setColors(color);" :class="{ 'dark': isDark}">
+  <div class="flex h-screen antialiased text-gray-900 bg-gray-100 dark:bg-dark dark:text-light">
+
+    <!-- Loading -->
+    <div x-ref="loading"
+         class="fixed inset-0 z-50 flex items-center justify-center text-2xl font-semibold text-white bg-primary-darker">
+      Loading.....
+    </div>
+
+  <!-- Sidebar -->
+<aside class="flex-shrink-0 hidden w-64 bg-gray-50 border-r dark:border-primary-darker dark:bg-darker md:block">
+  <div class="flex flex-col h-full">
+
+    <nav aria-label="Main" class="flex-1 space-y-3 overflow-y-hidden hover:overflow-y-auto">
+
+      <!-- Header -->
+      <header class="erp-header">
+        <div class="erp-welcome text-center px-3">
+          <hr>
+          <p class="text-sm font-semibold">Welcome to our College ERP</p>
+          <hr>
+        </div>
+      </header>
+
+<?php
+/* ==============================
+   RECURSIVE SIDEBAR MENU FUNCTION
+================================ */
+function renderSideMenu($items, $level = 0)
+{
+    foreach ($items as $m) {
+
+        $hasChild = !empty($m['children']);
+        $paddingLeft = 1 + ($level * 1.25); // indentation
+?>
+        <div x-data="{ open: false }" class="select-none">
+
+          <!-- MENU ITEM -->
+          <a href="<?= $hasChild ? '#' : $m['url'] ?>"
+             @click="<?= $hasChild ? 'open = !open; $event.preventDefault();' : '' ?>"
+             class="flex items-center p-2 text-sm text-black dark:text-light hover:bg-gray-200 dark:hover:bg-primary cursor-pointer"
+             style="padding-left: <?= $paddingLeft ?>rem;">
+
+              <i class="<?= $m['icon'] ?> w-5 h-5 text-blue-600"></i>
+              <span class="ml-2 font-medium"><?= $m['title'] ?></span>
+
+              <?php if ($hasChild): ?>
+                <span class="ml-auto">
+                  <svg class="w-4 h-4 transition-transform duration-200"
+                       :class="{ 'rotate-180': open }"
+                       fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M19 9l-7 7-7-7" />
+                  </svg>
+                </span>
+              <?php endif; ?>
+          </a>
+
+          <!-- CHILD MENU (RECURSIVE) -->
+          <?php if ($hasChild): ?>
+            <div x-show="open" x-transition class="mt-1 space-y-1" >
+              <?php renderSideMenu($m['children'], $level + 1); ?>
+            </div>
+          <?php endif; ?>
+
+        </div>
+<?php
+    }
+}
+?>
+
+<?php
+// Render menu
+renderSideMenu($menu_items);
+?>
+
+    </nav>
+  </div>
+</aside>
+
+
+		<?php } ?>
+
+		<?php
+		function page_header()
+		{
+// Logout handling
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header("Location: index.php");
+    exit;
+}
+
+// Redirect to login if not logged in
+if (!isset($_SESSION['user_id'])) {
+    header("Location: index.php");
+    exit;
+}
+		?>
+<div class="flex-1 h-full overflow-x-hidden overflow-y-auto">
+<header class="relative bg-white dark:bg-darker" style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+  color: #fff;">
+            <div class="flex items-center justify-between p-2 border-b dark:border-primary-darker">
+              <!-- Mobile menu button -->
+              <button
+                @click="isMobileMainMenuOpen = !isMobileMainMenuOpen"
+                class="p-1 transition-colors duration-200 rounded-md text-primary-lighter bg-primary-50 hover:text-primary hover:bg-primary-100 dark:hover:text-light dark:hover:bg-primary-dark dark:bg-dark md:hidden focus:outline-none focus:ring"
+              >
+                <span class="sr-only">Open main manu</span>
+                <span aria-hidden="true">
+                  <svg
+                    class="w-8 h-8"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                  </svg>
+                </span>
+              </button>
+
+              <!-- Brand -->
+             <a
+			  href="index.html"
+			  class="flex items-center gap-4 text-2xl font-bold tracking-wider
+					 dark:text-light"
+			>
+			  <img 
+				src="../images/logo.png" 
+				alt="College Logo"
+				class="w-10 h-10 object-contain rounded-full"
+			  >
+			  <span>
+				Raghuveer Mahavidyalaya Thaloi, Bhikharipur Kala, Jaunpur (U.P.)</span>
+			</a>
+
+              <!-- Mobile sub menu button -->
+              <button
+                @click="isMobileSubMenuOpen = !isMobileSubMenuOpen"
+                class="p-1 transition-colors duration-200 rounded-md text-primary-lighter bg-primary-50 hover:text-primary hover:bg-primary-100 dark:hover:text-light dark:hover:bg-primary-dark dark:bg-dark md:hidden focus:outline-none focus:ring"
+              >
+                <span class="sr-only">Open sub manu</span>
+                <span aria-hidden="true">
+                  <svg
+                    class="w-8 h-8"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"
+                    />
+                  </svg>
+                </span>
+              </button>
+
+              <!-- Desktop Right buttons -->
+              <nav a class="hidden space-x-2 md:flex md:items-center" >
+                <!-- Toggle dark theme button -->
+               
+				<button @click="openSettingsPanel"
+				>
+				
+
+				   
+					<span> <a
+                      href="?logout=1"
+                      role="menuitem"
+                      class="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-light dark:hover:bg-primary" style="
+					background-color:#dc2626;
+					color:#ffffff;
+					width:100%;
+					padding:8px 16px;
+					font-size:14px;
+					border-radius:6px;
+					border:none;
+					cursor:pointer;
+					transition:background-color 0.3s ease;
+				"
+				onmouseover="this.style.backgroundColor='#b91c1c'"
+				onmouseout="this.style.backgroundColor='#dc2626'"
+                    >
+                      Logout
+                    </a></span>
+				</button>
+						   
+  <!-- User avatar button -->
+                <div class="relative" x-data="{ open: false }">
+                  <button
+                    @click="open = !open; $nextTick(() => { if(open){ $refs.userMenu.focus() } })"
+                    type="button"
+                    aria-haspopup="true"
+                    :aria-expanded="open ? 'true' : 'false'"
+                    class="transition-opacity duration-200 rounded-full dark:opacity-75 dark:hover:opacity-100 focus:outline-none focus:ring dark:focus:opacity-100"
+                  >
+                    <span class="sr-only">User menu</span>
+                    <img class="w-10 h-10 rounded-full" src="build/images/avatar.jpg" alt="Ahmed Kamel" />
+                  </button>
+
+                  <!-- User dropdown menu -->
+                  <div
+                    x-show="open"
+                    x-ref="userMenu"
+                    x-transition:enter="transition-all transform ease-out"
+                    x-transition:enter-start="translate-y-1/2 opacity-0"
+                    x-transition:enter-end="translate-y-0 opacity-100"
+                    x-transition:leave="transition-all transform ease-in"
+                    x-transition:leave-start="translate-y-0 opacity-100"
+                    x-transition:leave-end="translate-y-1/2 opacity-0"
+                    @click.away="open = false"
+                    @keydown.escape="open = false"
+                    class="absolute right-0 w-48 py-1 bg-white rounded-md shadow-lg top-12 ring-1 ring-black ring-opacity-5 dark:bg-dark focus:outline-none"
+                    tabindex="-1"
+                    role="menu"
+                    aria-orientation="vertical"
+                    aria-label="User menu"
+                  >
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-light dark:hover:bg-primary"
+                    >
+                      Your Profile
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-light dark:hover:bg-primary"
+                    >
+                      Settings
+                    </a>
+                  
+                  </div>
+                </div>
+
+                
+              </nav>
+
+              <!-- Mobile sub menu -->
+              <nav
+                x-transition:enter="transition duration-200 ease-in-out transform sm:duration-500"
+                x-transition:enter-start="-translate-y-full opacity-0"
+                x-transition:enter-end="translate-y-0 opacity-100"
+                x-transition:leave="transition duration-300 ease-in-out transform sm:duration-500"
+                x-transition:leave-start="translate-y-0 opacity-100"
+                x-transition:leave-end="-translate-y-full opacity-0"
+                x-show="isMobileSubMenuOpen"
+                @click.away="isMobileSubMenuOpen = false"
+                class="absolute flex items-center p-4 bg-white rounded-md shadow-lg dark:bg-darker top-16 inset-x-4 md:hidden"
+                aria-label="Secondary"
+              >
+                <div class="space-x-2">
+                  <!-- Toggle dark theme button -->
+                  <button aria-hidden="true" class="relative focus:outline-none" x-cloak @click="toggleTheme">
+                    <div
+                      class="w-12 h-6 transition rounded-full outline-none bg-primary-100 dark:bg-primary-lighter"
+                    ></div>
+                    <div
+                      class="absolute top-0 left-0 inline-flex items-center justify-center w-6 h-6 transition-all duration-200 transform scale-110 rounded-full shadow-sm"
+                      :class="{ 'translate-x-0 -translate-y-px  bg-white text-primary-dark': !isDark, 'translate-x-6 text-primary-100 bg-primary-darker': isDark }"
+                    >
+                      <svg
+                        x-show="!isDark"
+                        class="w-4 h-4"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"
+                        />
+                      </svg>
+                      <svg
+                        x-show="isDark"
+                        class="w-4 h-4"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"
+                        />
+                      </svg>
+                    </div>
+                  </button>
+
+                  <!-- Notification button -->
+                  <button
+                    @click="openNotificationsPanel(); $nextTick(() => { isMobileSubMenuOpen = false })"
+                    class="p-2 transition-colors duration-200 rounded-full text-primary-lighter bg-primary-50 hover:text-primary hover:bg-primary-100 dark:hover:text-light dark:hover:bg-primary-dark dark:bg-dark focus:outline-none focus:bg-primary-100 dark:focus:bg-primary-dark focus:ring-primary-darker"
+                  >
+                    <span class="sr-only">Open notifications panel</span>
+                    <svg
+                      class="w-7 h-7"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+                      />
+                    </svg>
+                  </button>
+
+                  <!-- Search button -->
+                  <button
+                    @click="openSearchPanel(); $nextTick(() => { $refs.searchInput.focus(); setTimeout(() => {isMobileSubMenuOpen= false}, 100) })"
+                    class="p-2 transition-colors duration-200 rounded-full text-primary-lighter bg-primary-50 hover:text-primary hover:bg-primary-100 dark:hover:text-light dark:hover:bg-primary-dark dark:bg-dark focus:outline-none focus:bg-primary-100 dark:focus:bg-primary-dark focus:ring-primary-darker"
+                  >
+                    <span class="sr-only">Open search panel</span>
+                    <svg
+                      class="w-7 h-7"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                      />
+                    </svg>
+                  </button>
+
+                  <!-- Settings button -->
+                  <button
+                    @click="openSettingsPanel(); $nextTick(() => { isMobileSubMenuOpen = false })"
+                    class="p-2 transition-colors duration-200 rounded-full text-primary-lighter bg-primary-50 hover:text-primary hover:bg-primary-100 dark:hover:text-light dark:hover:bg-primary-dark dark:bg-dark focus:outline-none focus:bg-primary-100 dark:focus:bg-primary-dark focus:ring-primary-darker"
+                  >
+                    <span class="sr-only">Open settings panel</span>
+                    <svg
+                      class="w-7 h-7"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+                      />
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                      />
+                    </svg>
+                  </button>
+                </div>
+
+                <!-- User avatar button -->
+                <div class="relative ml-auto" x-data="{ open: false }">
+                  <button
+                    @click="open = !open"
+                    type="button"
+                    aria-haspopup="true"
+                    :aria-expanded="open ? 'true' : 'false'"
+                    class="block transition-opacity duration-200 rounded-full dark:opacity-75 dark:hover:opacity-100 focus:outline-none focus:ring dark:focus:opacity-100"
+                  >
+                    <span class="sr-only">User menu</span>
+                    <img class="w-10 h-10 rounded-full" src="build/images/avatar.jpg" alt="Ahmed Kamel" />
+                  </button>
+
+                  <!-- User dropdown menu -->
+                  <div
+                    x-show="open"
+                    x-transition:enter="transition-all transform ease-out"
+                    x-transition:enter-start="translate-y-1/2 opacity-0"
+                    x-transition:enter-end="translate-y-0 opacity-100"
+                    x-transition:leave="transition-all transform ease-in"
+                    x-transition:leave-start="translate-y-0 opacity-100"
+                    x-transition:leave-end="translate-y-1/2 opacity-0"
+                    @click.away="open = false"
+                    class="absolute right-0 w-48 py-1 origin-top-right bg-white rounded-md shadow-lg top-12 ring-1 ring-black ring-opacity-5 dark:bg-dark"
+                    role="menu"
+                    aria-orientation="vertical"
+                    aria-label="User menu"
+                  >
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-light dark:hover:bg-primary"
+                    >
+                      Your Profile
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-light dark:hover:bg-primary"
+                    >
+                      Settings
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-light dark:hover:bg-primary"
+                    >
+                      Logout
+                    </a>
+                  </div>
+                </div>
+              </nav>
+            </div>
+            <!-- Mobile main manu -->
+            <div
+              class="border-b md:hidden dark:border-primary-darker"
+              x-show="isMobileMainMenuOpen"
+              @click.away="isMobileMainMenuOpen = false"
+            >
+              <nav aria-label="Main" class="px-2 py-4 space-y-2">
+                <!-- Dashboards links -->
+                <div x-data="{ isActive: true, open: true}">
+                  <!-- active & hover classes 'bg-primary-100 dark:bg-primary' -->
+                  <a
+                    href="#"
+                    @click="$event.preventDefault(); open = !open"
+                    class="flex items-center p-2 text-gray-500 transition-colors rounded-md dark:text-light hover:bg-primary-100 dark:hover:bg-primary"
+                    :class="{'bg-primary-100 dark:bg-primary': isActive || open}"
+                    role="button"
+                    aria-haspopup="true"
+                    :aria-expanded="(open || isActive) ? 'true' : 'false'"
+                  >
+                    <span aria-hidden="true">
+                      <svg
+                        class="w-5 h-5"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"
+                        />
+                      </svg>
+                    </span>
+                    <span class="ml-2 text-sm"> Dashboards </span>
+                    <span class="ml-auto" aria-hidden="true">
+                      <!-- active class 'rotate-180' -->
+                      <svg
+                        class="w-4 h-4 transition-transform transform"
+                        :class="{ 'rotate-180': open }"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </span>
+                  </a>
+                  <div role="menu" x-show="open" class="mt-2 space-y-2 px-7" aria-label="Dashboards">
+                    <!-- active & hover classes 'text-gray-700 dark:text-light' -->
+                    <!-- inActive classes 'text-gray-400 dark:text-gray-400' -->
+                    <a
+                      href="index.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-700 transition-colors duration-200 rounded-md dark:text-light dark:hover:text-light hover:text-gray-700"
+                    >
+                      Default
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Project Mangement (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      E-Commerce (soon)
+                    </a>
+                  </div>
+                </div>
+
+                <!-- Components links -->
+                <div x-data="{ isActive: false, open: false }">
+                  <!-- active classes 'bg-primary-100 dark:bg-primary' -->
+                  <a
+                    href="#"
+                    @click="$event.preventDefault(); open = !open"
+                    class="flex items-center p-2 text-gray-500 transition-colors rounded-md dark:text-light hover:bg-primary-100 dark:hover:bg-primary"
+                    :class="{ 'bg-primary-100 dark:bg-primary': isActive || open }"
+                    role="button"
+                    aria-haspopup="true"
+                    :aria-expanded="(open || isActive) ? 'true' : 'false'"
+                  >
+                    <span aria-hidden="true">
+                      <svg
+                        class="w-5 h-5"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"
+                        />
+                      </svg>
+                    </span>
+                    <span class="ml-2 text-sm"> Components </span>
+                    <span aria-hidden="true" class="ml-auto">
+                      <!-- active class 'rotate-180' -->
+                      <svg
+                        class="w-4 h-4 transition-transform transform"
+                        :class="{ 'rotate-180': open }"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </span>
+                  </a>
+                  <div x-show="open" class="mt-2 space-y-2 px-7" role="menu" arial-label="Components">
+                    <!-- active & hover classes 'text-gray-700 dark:text-light' -->
+                    <!-- inActive classes 'text-gray-400 dark:text-gray-400' -->
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      Alerts (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      Buttons (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Cards (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Dropdowns (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Forms (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Lists (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Modals (soon)
+                    </a>
+                  </div>
+                </div>
+
+                <!-- Pages links -->
+                <div x-data="{ isActive: false, open: false }">
+                  <!-- active classes 'bg-primary-100 dark:bg-primary' -->
+                  <a
+                    href="#"
+                    @click="$event.preventDefault(); open = !open"
+                    class="flex items-center p-2 text-gray-500 transition-colors rounded-md dark:text-light hover:bg-primary-100 dark:hover:bg-primary"
+                    :class="{ 'bg-primary-100 dark:bg-primary': isActive || open }"
+                    role="button"
+                    aria-haspopup="true"
+                    :aria-expanded="(open || isActive) ? 'true' : 'false'"
+                  >
+                    <span aria-hidden="true">
+                      <svg
+                        class="w-5 h-5"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"
+                        />
+                      </svg>
+                    </span>
+                    <span class="ml-2 text-sm"> Pages </span>
+                    <span aria-hidden="true" class="ml-auto">
+                      <!-- active class 'rotate-180' -->
+                      <svg
+                        class="w-4 h-4 transition-transform transform"
+                        :class="{ 'rotate-180': open }"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </span>
+                  </a>
+                  <div x-show="open" class="mt-2 space-y-2 px-7" role="menu" arial-label="Pages">
+                    <!-- active & hover classes 'text-gray-700 dark:text-light' -->
+                    <!-- inActive classes 'text-gray-400 dark:text-gray-400' -->
+                    <a
+                      href="pages/blank.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      Blank
+                    </a>
+                    <a
+                      href="pages/404.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      404
+                    </a>
+                    <a
+                      href="pages/500.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      500
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      Profile (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Pricing (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Kanban (soon)
+                    </a>
+                    <a
+                      href="#"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Feed (soon)
+                    </a>
+                  </div>
+                </div>
+
+                <!-- Authentication links -->
+                <div x-data="{ isActive: false, open: false}">
+                  <!-- active & hover classes 'bg-primary-100 dark:bg-primary' -->
+                  <a
+                    href="#"
+                    @click="$event.preventDefault(); open = !open"
+                    class="flex items-center p-2 text-gray-500 transition-colors rounded-md dark:text-light hover:bg-primary-100 dark:hover:bg-primary"
+                    :class="{'bg-primary-100 dark:bg-primary': isActive || open}"
+                    role="button"
+                    aria-haspopup="true"
+                    :aria-expanded="(open || isActive) ? 'true' : 'false'"
+                  >
+                    <span aria-hidden="true">
+                      <svg
+                        class="w-5 h-5"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+                        />
+                      </svg>
+                    </span>
+                    <span class="ml-2 text-sm"> Authentication </span>
+                    <span aria-hidden="true" class="ml-auto">
+                      <!-- active class 'rotate-180' -->
+                      <svg
+                        class="w-4 h-4 transition-transform transform"
+                        :class="{ 'rotate-180': open }"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </span>
+                  </a>
+                  <div x-show="open" class="mt-2 space-y-2 px-7" role="menu" aria-label="Authentication">
+                    <!-- active & hover classes 'text-gray-700 dark:text-light' -->
+                    <!-- inActive classes 'text-gray-400 dark:text-gray-400' -->
+                    <a
+                      href="auth/register.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Register
+                    </a>
+                    <a
+                      href="auth/login.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Login
+                    </a>
+                    <a
+                      href="auth/forgot-password.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Forgot Password
+                    </a>
+                    <a
+                      href="auth/reset-password.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:hover:text-light hover:text-gray-700"
+                    >
+                      Reset Password
+                    </a>
+                  </div>
+                </div>
+
+                <!-- Layouts links -->
+                <div x-data="{ isActive: false, open: false}">
+                  <!-- active & hover classes 'bg-primary-100 dark:bg-primary' -->
+                  <a
+                    href="#"
+                    @click="$event.preventDefault(); open = !open"
+                    class="flex items-center p-2 text-gray-500 transition-colors rounded-md dark:text-light hover:bg-primary-100 dark:hover:bg-primary"
+                    :class="{'bg-primary-100 dark:bg-primary': isActive || open}"
+                    role="button"
+                    aria-haspopup="true"
+                    :aria-expanded="(open || isActive) ? 'true' : 'false'"
+                  >
+                    <span aria-hidden="true">
+                      <svg
+                        class="w-5 h-5"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
+                        />
+                      </svg>
+                    </span>
+                    <span class="ml-2 text-sm"> Layouts </span>
+                    <span aria-hidden="true" class="ml-auto">
+                      <!-- active class 'rotate-180' -->
+                      <svg
+                        class="w-4 h-4 transition-transform transform"
+                        :class="{ 'rotate-180': open }"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </span>
+                  </a>
+                  <div x-show="open" class="mt-2 space-y-2 px-7" role="menu" aria-label="Layouts">
+                    <!-- active & hover classes 'text-gray-700 dark:text-light' -->
+                    <!-- inActive classes 'text-gray-400 dark:text-gray-400' -->
+                    <a
+                      href="layouts/two-columns-sidebar.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      Two Columns Sidebar
+                    </a>
+                    <a
+                      href="layouts/mini-plus-one-columns-sidebar.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      Mini + One Columns Sidebar
+                    </a>
+                    <a
+                      href="layouts/mini-column-sidebar.html"
+                      role="menuitem"
+                      class="block p-2 text-sm text-gray-400 transition-colors duration-200 rounded-md dark:text-gray-400 dark:hover:text-light hover:text-gray-700"
+                    >
+                      Mini Column Sidebar
+                    </a>
+                  </div>
+                </div>
+              </nav>
+            </div>
+          </header>
+<?php
+}
+?>
+<?php
+function page_footer()
+{
+?>
+<footer class=" dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 shadow-inner rounded-t-lg p-6 flex flex-col md:flex-row items-center justify-between space-y-3 md:space-y-0" style="background-color:#1f3e8f">
+  <div class="text-white dark:text-gray-300 font-medium">
+    Weknow Technologies &copy; 2025
+  </div>
+ 
+</footer>
+
+        </div>
+		  <!-- Panels -->
+
+        <!-- Settings Panel -->
+        <!-- Backdrop -->
+        <div
+          x-transition:enter="transition duration-300 ease-in-out"
+          x-transition:enter-start="opacity-0"
+          x-transition:enter-end="opacity-100"
+          x-transition:leave="transition duration-300 ease-in-out"
+          x-transition:leave-start="opacity-100"
+          x-transition:leave-end="opacity-0"
+          x-show="isSettingsPanelOpen"
+          @click="isSettingsPanelOpen = false"
+          class="fixed inset-0 z-10 bg-primary-darker"
+          style="opacity: 0.5"
+          aria-hidden="true"
+        ></div>
+        <!-- Panel -->
+        <section
+          x-transition:enter="transition duration-300 ease-in-out transform sm:duration-500"
+          x-transition:enter-start="translate-x-full"
+          x-transition:enter-end="translate-x-0"
+          x-transition:leave="transition duration-300 ease-in-out transform sm:duration-500"
+          x-transition:leave-start="translate-x-0"
+          x-transition:leave-end="translate-x-full"
+          x-ref="settingsPanel"
+          tabindex="-1"
+          x-show="isSettingsPanelOpen"
+          @keydown.escape="isSettingsPanelOpen = false"
+          class="fixed inset-y-0 right-0 z-20 w-full max-w-xs bg-white shadow-xl dark:bg-darker dark:text-light sm:max-w-md focus:outline-none"
+          aria-labelledby="settinsPanelLabel"
+        >
+          <div class="absolute left-0 p-2 transform -translate-x-full">
+            <!-- Close button -->
+            <button
+              @click="isSettingsPanelOpen = false"
+              class="p-2 text-white rounded-md focus:outline-none focus:ring"
+            >
+              <svg
+                class="w-5 h-5"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <!-- Panel content -->
+          <div class="flex flex-col h-screen">
+            <!-- Panel header -->
+            <div
+              class="flex flex-col items-center justify-center flex-shrink-0 px-4 py-8 space-y-4 border-b dark:border-primary-dark"
+            >
+              <span aria-hidden="true" class="text-gray-500 dark:text-primary">
+                <svg
+                  class="w-8 h-8"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"
+                  />
+                </svg>
+              </span>
+              <h2 id="settinsPanelLabel" class="text-xl font-medium text-gray-500 dark:text-light">Settings</h2>
+            </div>
+            <!-- Content -->
+            <div class="flex-1 overflow-hidden hover:overflow-y-auto">
+              <!-- Theme -->
+              <div class="p-4 space-y-4 md:p-8">
+                <h6 class="text-lg font-medium text-gray-400 dark:text-light">Mode</h6>
+                <div class="flex items-center space-x-8">
+                  <!-- Light button -->
+                  <button
+                    @click="setLightTheme"
+                    class="flex items-center justify-center px-4 py-2 space-x-4 transition-colors border rounded-md hover:text-gray-900 hover:border-gray-900 dark:border-primary dark:hover:text-primary-100 dark:hover:border-primary-light focus:outline-none focus:ring focus:ring-primary-lighter focus:ring-offset-2 dark:focus:ring-offset-dark dark:focus:ring-primary-dark"
+                    :class="{ 'border-gray-900 text-gray-900 dark:border-primary-light dark:text-primary-100': !isDark, 'text-gray-500 dark:text-primary-light': isDark }"
+                  >
+                    <span>
+                      <svg
+                        class="w-6 h-6"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"
+                        />
+                      </svg>
+                    </span>
+                    <span>Light</span>
+                  </button>
+
+                  <!-- Dark button -->
+                  <button
+                    @click="setDarkTheme"
+                    class="flex items-center justify-center px-4 py-2 space-x-4 transition-colors border rounded-md hover:text-gray-900 hover:border-gray-900 dark:border-primary dark:hover:text-primary-100 dark:hover:border-primary-light focus:outline-none focus:ring focus:ring-primary-lighter focus:ring-offset-2 dark:focus:ring-offset-dark dark:focus:ring-primary-dark"
+                    :class="{ 'border-gray-900 text-gray-900 dark:border-primary-light dark:text-primary-100': isDark, 'text-gray-500 dark:text-primary-light': !isDark }"
+                  >
+                    <span>
+                      <svg
+                        class="w-6 h-6"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"
+                        />
+                      </svg>
+                    </span>
+                    <span>Dark</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Colors -->
+              <div class="p-4 space-y-4 md:p-8">
+                <h6 class="text-lg font-medium text-gray-400 dark:text-light">Colors</h6>
+                <div>
+                  <button
+                    @click="setColors('cyan')"
+                    class="w-10 h-10 rounded-full"
+                    style="background-color: var(--color-cyan)"
+                  ></button>
+                  <button
+                    @click="setColors('teal')"
+                    class="w-10 h-10 rounded-full"
+                    style="background-color: var(--color-teal)"
+                  ></button>
+                  <button
+                    @click="setColors('green')"
+                    class="w-10 h-10 rounded-full"
+                    style="background-color: var(--color-green)"
+                  ></button>
+                  <button
+                    @click="setColors('fuchsia')"
+                    class="w-10 h-10 rounded-full"
+                    style="background-color: var(--color-fuchsia)"
+                  ></button>
+                  <button
+                    @click="setColors('blue')"
+                    class="w-10 h-10 rounded-full"
+                    style="background-color: var(--color-blue)"
+                  ></button>
+                  <button
+                    @click="setColors('violet')"
+                    class="w-10 h-10 rounded-full"
+                    style="background-color: var(--color-violet)"
+                  ></button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Notification panel -->
+        <!-- Backdrop -->
+        <div
+          x-transition:enter="transition duration-300 ease-in-out"
+          x-transition:enter-start="opacity-0"
+          x-transition:enter-end="opacity-100"
+          x-transition:leave="transition duration-300 ease-in-out"
+          x-transition:leave-start="opacity-100"
+          x-transition:leave-end="opacity-0"
+          x-show="isNotificationsPanelOpen"
+          @click="isNotificationsPanelOpen = false"
+          class="fixed inset-0 z-10 bg-primary-darker"
+          style="opacity: 0.5"
+          aria-hidden="true"
+        ></div>
+        <!-- Panel -->
+        <section
+          x-transition:enter="transition duration-300 ease-in-out transform sm:duration-500"
+          x-transition:enter-start="-translate-x-full"
+          x-transition:enter-end="translate-x-0"
+          x-transition:leave="transition duration-300 ease-in-out transform sm:duration-500"
+          x-transition:leave-start="translate-x-0"
+          x-transition:leave-end="-translate-x-full"
+          x-ref="notificationsPanel"
+          x-show="isNotificationsPanelOpen"
+          @keydown.escape="isNotificationsPanelOpen = false"
+          tabindex="-1"
+          aria-labelledby="notificationPanelLabel"
+          class="fixed inset-y-0 z-20 w-full max-w-xs bg-white dark:bg-darker dark:text-light sm:max-w-md focus:outline-none"
+        >
+          <div class="absolute right-0 p-2 transform translate-x-full">
+            <!-- Close button -->
+            <button
+              @click="isNotificationsPanelOpen = false"
+              class="p-2 text-white rounded-md focus:outline-none focus:ring"
+            >
+              <svg
+                class="w-5 h-5"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div class="flex flex-col h-screen" x-data="{ activeTabe: 'action' }">
+            <!-- Panel header -->
+            <div class="flex-shrink-0">
+              <div class="flex items-center justify-between px-4 pt-4 border-b dark:border-primary-darker">
+                <h2 id="notificationPanelLabel" class="pb-4 font-semibold">Notifications</h2>
+                <div class="space-x-2">
+                  <button
+                    @click.prevent="activeTabe = 'action'"
+                    class="px-px pb-4 transition-all duration-200 transform translate-y-px border-b focus:outline-none"
+                    :class="{'border-primary-dark dark:border-primary': activeTabe == 'action', 'border-transparent': activeTabe != 'action'}"
+                  >
+                    Action
+                  </button>
+                  <button
+                    @click.prevent="activeTabe = 'user'"
+                    class="px-px pb-4 transition-all duration-200 transform translate-y-px border-b focus:outline-none"
+                    :class="{'border-primary-dark dark:border-primary': activeTabe == 'user', 'border-transparent': activeTabe != 'user'}"
+                  >
+                    User
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Panel content (tabs) -->
+            <div class="flex-1 pt-4 overflow-y-hidden hover:overflow-y-auto">
+              <!-- Action tab -->
+              <div class="space-y-4" x-show.transition.in="activeTabe == 'action'">
+                <a href="#" class="block">
+                  <div class="flex px-4 space-x-4">
+                    <div class="relative flex-shrink-0">
+                      <span
+                        class="z-10 inline-block p-2 overflow-visible rounded-full bg-primary-50 text-primary-light dark:bg-primary-darker"
+                      >
+                        <svg
+                          class="w-7 h-7"
+                          xmlns="http://www.w3.org/2000/svg"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                        >
+                          <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+                          />
+                        </svg>
+                      </span>
+                      <div class="absolute h-24 p-px -mt-3 -ml-px bg-primary-50 left-1/2 dark:bg-primary-darker"></div>
+                    </div>
+                    <div class="flex-1 overflow-hidden">
+                      <h5 class="text-sm font-semibold text-gray-600 dark:text-light">
+                        New project "Raghuveer Mahavidyalaya Dashboard" created
+                      </h5>
+                      <p class="text-sm font-normal text-gray-400 truncate dark:text-primary-lighter">
+                        Looks like there might be a new theme soon
+                      </p>
+                      <span class="text-sm font-normal text-gray-400 dark:text-primary-light"> 9h ago </span>
+                    </div>
+                  </div>
+                </a>
+                <a href="#" class="block">
+                  <div class="flex px-4 space-x-4">
+                    <div class="relative flex-shrink-0">
+                      <span
+                        class="inline-block p-2 overflow-visible rounded-full bg-primary-50 text-primary-light dark:bg-primary-darker"
+                      >
+                        <svg
+                          class="w-7 h-7"
+                          xmlns="http://www.w3.org/2000/svg"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                        >
+                          <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+                          />
+                        </svg>
+                      </span>
+                      <div class="absolute h-24 p-px -mt-3 -ml-px bg-primary-50 left-1/2 dark:bg-primary-darker"></div>
+                    </div>
+                    <div class="flex-1 overflow-hidden">
+                      <h5 class="text-sm font-semibold text-gray-600 dark:text-light">
+                        Raghuveer Mahavidyalaya Dashboard v0.0.2 was released
+                      </h5>
+                      <p class="text-sm font-normal text-gray-400 truncate dark:text-primary-lighter">
+                        Successful new version was released
+                      </p>
+                      <span class="text-sm font-normal text-gray-400 dark:text-primary-light"> 2d ago </span>
+                    </div>
+                  </div>
+                </a>
+                <template x-for="i in 20" x-key="i">
+                  <a href="#" class="block">
+                    <div class="flex px-4 space-x-4">
+                      <div class="relative flex-shrink-0">
+                        <span
+                          class="inline-block p-2 overflow-visible rounded-full bg-primary-50 text-primary-light dark:bg-primary-darker"
+                        >
+                          <svg
+                            class="w-7 h-7"
+                            xmlns="http://www.w3.org/2000/svg"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                              stroke-width="2"
+                              d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+                            />
+                          </svg>
+                        </span>
+                        <div
+                          class="absolute h-24 p-px -mt-3 -ml-px bg-primary-50 left-1/2 dark:bg-primary-darker"
+                        ></div>
+                      </div>
+                      <div class="flex-1 overflow-hidden">
+                        <h5 class="text-sm font-semibold text-gray-600 dark:text-light">
+                          New project "Raghuveer Mahavidyalaya Dashboard" created
+                        </h5>
+                        <p class="text-sm font-normal text-gray-400 truncate dark:text-primary-lighter">
+                          Looks like there might be a new theme soon
+                        </p>
+                        <span class="text-sm font-normal text-gray-400 dark:text-primary-light"> 9h ago </span>
+                      </div>
+                    </div>
+                  </a>
+                </template>
+              </div>
+
+              <!-- User tab -->
+              <div class="space-y-4" x-show.transition.in="activeTabe == 'user'">
+                <a href="#" class="block">
+                  <div class="flex px-4 space-x-4">
+                    <div class="relative flex-shrink-0">
+                      <span class="relative z-10 inline-block overflow-visible rounded-ful">
+                        <img
+                          class="object-cover rounded-full w-9 h-9"
+                          src="build/images/avatar.jpg"
+                          alt="Roshan Patel"
+                        />
+                      </span>
+                      <div class="absolute h-24 p-px -mt-3 -ml-px bg-primary-50 left-1/2 dark:bg-primary-darker"></div>
+                    </div>
+                    <div class="flex-1 overflow-hidden">
+                      <h5 class="text-sm font-semibold text-gray-600 dark:text-light">Roshan Patel</h5>
+                      <p class="text-sm font-normal text-gray-400 truncate dark:text-primary-lighter">
+                        Shared new project "Raghuveer Mahavidyalaya"
+                      </p>
+                      <span class="text-sm font-normal text-gray-400 dark:text-primary-light"> 1d ago </span>
+                    </div>
+                  </div>
+                </a>
+                <a href="#" class="block">
+                  <div class="flex px-4 space-x-4">
+                    <div class="relative flex-shrink-0">
+                      <span class="relative z-10 inline-block overflow-visible rounded-ful">
+                        <img
+                          class="object-cover rounded-full w-9 h-9"
+                          src="build/images/avatar-1.jpg"
+                          alt="Roshan Patel"
+                        />
+                      </span>
+                      <div class="absolute h-24 p-px -mt-3 -ml-px bg-primary-50 left-1/2 dark:bg-primary-darker"></div>
+                    </div>
+                    <div class="flex-1 overflow-hidden">
+                      <h5 class="text-sm font-semibold text-gray-600 dark:text-light">John</h5>
+                      <p class="text-sm font-normal text-gray-400 truncate dark:text-primary-lighter">
+                        Commit new changes to Raghuveer Mahavidyalaya project.
+                      </p>
+                      <span class="text-sm font-normal text-gray-400 dark:text-primary-light"> 10h ago </span>
+                    </div>
+                  </div>
+                </a>
+                <a href="#" class="block">
+                  <div class="flex px-4 space-x-4">
+                    <div class="relative flex-shrink-0">
+                      <span class="relative z-10 inline-block overflow-visible rounded-ful">
+                        <img
+                          class="object-cover rounded-full w-9 h-9"
+                          src="build/images/avatar.jpg"
+                          alt="Roshan Patel"
+                        />
+                      </span>
+                      <div class="absolute h-24 p-px -mt-3 -ml-px bg-primary-50 left-1/2 dark:bg-primary-darker"></div>
+                    </div>
+                    <div class="flex-1 overflow-hidden">
+                      <h5 class="text-sm font-semibold text-gray-600 dark:text-light">Roshan Patel</h5>
+                      <p class="text-sm font-normal text-gray-400 truncate dark:text-primary-lighter">
+                        Release new version "Raghuveer Mahavidyalaya"
+                      </p>
+                      <span class="text-sm font-normal text-gray-400 dark:text-primary-light"> 20d ago </span>
+                    </div>
+                  </div>
+                </a>
+                <template x-for="i in 10" x-key="i">
+                  <a href="#" class="block">
+                    <div class="flex px-4 space-x-4">
+                      <div class="relative flex-shrink-0">
+                        <span class="relative z-10 inline-block overflow-visible rounded-ful">
+                          <img
+                            class="object-cover rounded-full w-9 h-9"
+                            src="build/images/avatar.jpg"
+                            alt="Roshan Patel"
+                          />
+                        </span>
+                        <div
+                          class="absolute h-24 p-px -mt-3 -ml-px bg-primary-50 left-1/2 dark:bg-primary-darker"
+                        ></div>
+                      </div>
+                      <div class="flex-1 overflow-hidden">
+                        <h5 class="text-sm font-semibold text-gray-600 dark:text-light">Roshan Patel</h5>
+                        <p class="text-sm font-normal text-gray-400 truncate dark:text-primary-lighter">
+                          Release new version "Raghuveer Mahavidyalaya"
+                        </p>
+                        <span class="text-sm font-normal text-gray-400 dark:text-primary-light"> 20d ago </span>
+                      </div>
+                    </div>
+                  </a>
+                </template>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Search panel -->
+        <!-- Backdrop -->
+        <div
+          x-transition:enter="transition duration-300 ease-in-out"
+          x-transition:enter-start="opacity-0"
+          x-transition:enter-end="opacity-100"
+          x-transition:leave="transition duration-300 ease-in-out"
+          x-transition:leave-start="opacity-100"
+          x-transition:leave-end="opacity-0"
+          x-show="isSearchPanelOpen"
+          @click="isSearchPanelOpen = false"
+          class="fixed inset-0 z-10 bg-primary-darker"
+          style="opacity: 0.5"
+          aria-hidden="ture"
+        ></div>
+        <!-- Panel -->
+        <section
+          x-transition:enter="transition duration-300 ease-in-out transform sm:duration-500"
+          x-transition:enter-start="-translate-x-full"
+          x-transition:enter-end="translate-x-0"
+          x-transition:leave="transition duration-300 ease-in-out transform sm:duration-500"
+          x-transition:leave-start="translate-x-0"
+          x-transition:leave-end="-translate-x-full"
+          x-show="isSearchPanelOpen"
+          @keydown.escape="isSearchPanelOpen = false"
+          class="fixed inset-y-0 z-20 w-full max-w-xs bg-white shadow-xl dark:bg-darker dark:text-light sm:max-w-md focus:outline-none"
+        >
+          <div class="absolute right-0 p-2 transform translate-x-full">
+            <!-- Close button -->
+            <button @click="isSearchPanelOpen = false" class="p-2 text-white rounded-md focus:outline-none focus:ring">
+              <svg
+                class="w-5 h-5"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          <h2 class="sr-only">Search panel</h2>
+          <!-- Panel content -->
+          <div class="flex flex-col h-screen">
+            <!-- Panel header (Search input) -->
+            <div
+              class="relative flex-shrink-0 px-4 py-8 text-gray-400 border-b dark:border-primary-darker dark:focus-within:text-light focus-within:text-gray-700"
+            >
+              <span class="absolute inset-y-0 inline-flex items-center px-4">
+                <svg
+                  class="w-5 h-5"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+              </span>
+              <input
+                x-ref="searchInput"
+                type="text"
+                class="w-full py-2 pl-10 pr-4 border rounded-full dark:bg-dark dark:border-transparent dark:text-light focus:outline-none focus:ring"
+                placeholder="Search..."
+              />
+            </div>
+
+            
+          </div>
+        </section>
+      </div>
+    </div>
+<?php
+}
+
+function get_college_settings($id = 1) {
+    global $db;
+    
+    $id = (int)$id;
+    $sql = "SELECT * FROM college_settings WHERE id = $id LIMIT 1";
+    $res = mysqli_query($db, $sql);
+    
+    if ($res && mysqli_num_rows($res) > 0) {
+        return mysqli_fetch_assoc($res);
+    }
+    
+    return null;
+}
+
+function get_name_from_sno($table, $sno, $sno_column = null, $name_column = null) {
+    global $db;
+    
+    if (empty($sno)) return '';
+    
+    if ($sno_column === null) {
+        $sno_column = strtolower($table) . '_sno';
+    }
+    if ($name_column === null) {
+        if ($table === 'categories') {
+            $name_column = 'category_name';
+        } else {
+            $name_column = strtolower($table) . '_name';
+        }
+    }
+    
+    $sno = (int)$sno;
+    $sno_column = mysqli_real_escape_string($db, $sno_column);
+    $name_column = mysqli_real_escape_string($db, $name_column);
+    $table = mysqli_real_escape_string($db, $table);
+    
+    $sql = "SELECT `$name_column` as name FROM `$table` WHERE `$sno_column` = $sno LIMIT 1";
+    $res = mysqli_query($db, $sql);
+    
+    if ($res && mysqli_num_rows($res) > 0) {
+        $row = mysqli_fetch_assoc($res);
+        return $row['name'] ?? '';
+    }
+    
+    return '';
+}
+
+function get_category_name($sno) {
+    return get_name_from_sno('categories', $sno, 'categories_sno', 'category_name');
+}
+
+function get_gender_name($sno) {
+    return get_name_from_sno('genders', $sno, 'gender_sno', 'gender_name');
+}
+
+function get_religion_name($sno) {
+    return get_name_from_sno('religions', $sno, 'religion_sno', 'religion_name');
+}
+
+function print_header($label = '') {
+    global $db;
+    static $watermark_rendered = false;
+    
+    // Fetch settings from id=1
+    $sql = "SELECT * FROM college_settings WHERE id = 1 LIMIT 1";
+    $res = mysqli_query($db, $sql);
+    
+    if (!$res || mysqli_num_rows($res) == 0) {
+        return;
+    }
+    
+    $settings = mysqli_fetch_assoc($res);
+    
+    $college_name = $settings['college_name'] ?? '';
+    $tagline = $settings['tagline'] ?? '';
+    
+    // Use ONLY p_logo column for print
+    $logo = $settings['p_logo'] ?? '';
+    
+    // Use ONLY p_background column for print watermark
+    $background = $settings['p_background'] ?? '';
+    
+    // Watermark uses p_background if available
+    $watermark = !empty($background) ? $background : '';
+    
+    // FALLBACK & PATH CORRECTION
+    if (empty($logo)) $logo = '../images/logo.png';
+    if (empty($watermark)) $watermark = '../images/logo.png';
+    
+    // Adjust for Admin Panel (running from subfolder)
+    if (!file_exists($logo) && file_exists('../' . $logo)) {
+        $logo = '../' . $logo;
+    }
+    if (!file_exists($watermark) && file_exists('../' . $watermark)) {
+        $watermark = '../' . $watermark;
+    }
+    
+    ?>
+    <div class="container-fluid border" style="position: relative;">
+        <!-- Watermark Overlay (only if p_background is set and not already rendered) -->
+        <?php if (!empty($watermark) && !$watermark_rendered): ?>
+        <img src="<?php echo htmlspecialchars($watermark); ?>" 
+             id="overlays" 
+             style="z-index:-1; opacity:0.05 !important; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width:30%; max-width:600px; pointer-events: none;" 
+             alt="watermark" >
+        <?php $watermark_rendered = true; ?>
+        <?php endif; ?>
+        
+        <table width="100%" style="margin:0px; position: relative; z-index: 1;">
+            <tr>
+                <th width="12%" rowspan="2">
+                    <?php if (!empty($logo)): ?>
+                        <img style="padding:15px; height:65px; width:65px;" 
+                             src="<?php echo htmlspecialchars($logo); ?>" 
+                             alt="logo" class="img-fluid d-block m-auto" /> 
+                    <?php else: ?>
+                        <div style="padding:15px; height:65px; width:65px; border:1px dashed #ccc; display:flex; align-items:center; justify-content:center; font-size:10px; color:#999; margin:auto;">No Logo</div>
+                    <?php endif; ?>
+                </th>
+                <th width="88%">
+                    <h4 style="text-align: center; margin:0px; color:#1e3a8a;">
+                        <span style="font-size:17px;"><b><?php echo htmlspecialchars($college_name); ?></b></span>
+                        <br><?php echo htmlspecialchars($tagline); ?>
+                    </h4>
+                </th>
+            </tr>
+        </table>
+
+        <?php if (!empty($label)): ?>
+        <div class="row">
+            <div class="container d-flex justify-content-center">
+                <p style="text-decoration: underline; text-align:center; color:#1e3a8a; font-weight: bold;">
+                    UNIQUE IDENTIFICATION NUMBER REGISTRATION - <?php echo date('Y'); ?> (<?php echo htmlspecialchars($label); ?>)
+                </p>
+            </div>
+        </div>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+?>

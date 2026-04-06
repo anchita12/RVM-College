@@ -1,0 +1,8 @@
+{
+    "noto sans devanagari": {
+        "normal": "D:\\htdocs\\well_known\\vendor\\dompdf\\dompdf\/lib\/fonts\/noto_sans_devanagari_normal_32dbad8377a6bc43a2b9183b275065d5",
+        "500": "D:\\htdocs\\well_known\\vendor\\dompdf\\dompdf\/lib\/fonts\/noto_sans_devanagari_500_01ddb4bfe02ad170cc1365d0399762f6",
+        "600": "noto_sans_devanagari_600_4ff0d6c6bd1eeb8d4992893dc0f4c80d",
+        "bold": "D:\\htdocs\\well_known\\vendor\\dompdf\\dompdf\/lib\/fonts\/noto_sans_devanagari_bold_3299edb80bd812f725ffa357dbb9cad6"
+    }
+}

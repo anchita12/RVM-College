@@ -1,0 +1,75 @@
+.college-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 20px 0;
+    margin-bottom: 30px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+.college-header-content {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.college-logo {
+    max-width: 100px;
+    max-height: 100px;
+    object-fit: contain;
+}
+
+.college-info {
+    flex: 1;
+}
+
+.college-name {
+    font-size: 1.8rem;
+    font-weight: bold;
+    margin: 0;
+    line-height: 1.2;
+}
+
+.college-tagline {
+    font-size: 0.95rem;
+    opacity: 0.9;
+    margin: 5px 0;
+}
+
+.college-badges {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+.college-badge {
+    background: rgba(255,255,255,0.2);
+    padding: 4px 12px;
+    border-radius: 15px;
+    font-size: 0.85rem;
+    backdrop-filter: blur(10px);
+}
+
+.college-contact {
+    text-align: right;
+    font-size: 0.9rem;
+}
+
+.college-contact i {
+    margin-right: 5px;
+}
+
+@media (max-width: 768px) {
+    .college-header-content {
+        flex-direction: column;
+        text-align: center;
+    }
+    
+    .college-contact {
+        text-align: center;
+    }
+    
+    .college-name {
+        font-size: 1.4rem;
+    }
+}

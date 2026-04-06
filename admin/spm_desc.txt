@@ -1,0 +1,7 @@
+sno | int
+student_info_sno | int
+add_subject_papers_sno | int
+academic_year | varchar(10)
+semester | int
+subject_category | varchar(100)
+created_at | datetime
